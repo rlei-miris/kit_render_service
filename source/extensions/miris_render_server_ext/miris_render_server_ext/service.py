@@ -10,72 +10,124 @@
 
 from pathlib import Path
 from pydantic import BaseModel, Field
+from typing import Tuple
 
 import omni.kit.commands
 import omni.usd
 from omni.services.core.routers import ServiceAPIRouter
+import omni.replicator.core as rep
+
+from pxr import UsdGeom
 
 router = ServiceAPIRouter(tags=["Miris Render Server Extension"])
 
 
-class CubeDataModel(BaseModel):
-    """Model of a request for generating a cube."""
-
-    asset_write_location: str = Field(
-        default="/asset_write_path",
-        title="Asset Path",
-        description="Location on device to write generated asset",
-    )
-
-    asset_name: str = Field(
-        default="cube",
-        title="Asset Name",
-        description="Name of the asset to be generated, .usda will be appended to the name",
-    )
-
-    cube_scale: float = Field(
-        default=100,
-        title="Cube Scale",
-        description="Scale of the cube",
+class OpenStageModel(BaseModel):
+    usd_file_location: str = Field(
+        default="/tmp/scene.usd",
+        title="USD File Location",
+        description="Location of the USD file to open",
     )
 
 
 @router.post(
-    "/generate_cube",
-    summary="Generate a cube",
-    description="An endpoint to generate a usda file containing a cube of given scale",
+    "/open_stage",
+    summary="Open a USD file",
+    description="An endpoint to open a USD file as the active stage",
 )
-async def generate_cube(cube_data: CubeDataModel):
-    print("[miris_render_server_ext] generate_cube was called")
+async def open_stage(open_stage_data: OpenStageModel):
+    print("[miris_render_server_ext] /open_stage was called")
 
-    # Create a new stage
+    # Open the usd file
     usd_context = omni.usd.get_context()
-    usd_context.new_stage()
-    stage = omni.usd.get_context().get_stage()
+    usd_context.open_stage(open_stage_data.usd_file_location)
 
-    # Set the default prim
-    default_prim_path = "/World"
-    stage.DefinePrim(default_prim_path, "Xform")
-    prim = stage.GetPrimAtPath(default_prim_path)
-    stage.SetDefaultPrim(prim)
+    # Set to path traced
+    rep.settings.set_render_pathtraced()
 
-    # Create cube
-    prim_type = "Cube"
-    prim_path = f"/World/{prim_type}"
+    msg = f"[miris_render_server_ext] Opened stage: {open_stage_data.usd_file_location}"
+    print(msg)
+    return msg
 
-    omni.kit.commands.execute(
-        "CreatePrim",
-        prim_path=prim_path,
-        prim_type=prim_type,
-        attributes={"size": cube_data.cube_scale},
-        select_new_prim=False,
+
+class RenderModel(BaseModel):
+
+    camera_name: str = Field(
+        default="camera_0",
+        title="Camera Name",
+        description="Name of the camera",
     )
 
-    # save stage
-    asset_file_path = str(Path(
-        cube_data.asset_write_location).joinpath(f"{cube_data.asset_name}.usda")
+    camera_position: Tuple[float, float, float] = Field(
+        default=(0, 0, 0),
+        title="Camera Position",
+        description="Position of the camera",
     )
-    stage.GetRootLayer().Export(asset_file_path)
-    msg = f"[miris_render_server_ext] Wrote a cube to this path: {asset_file_path}"
+
+    camera_rotation: Tuple[float, float, float] = Field(
+        default=(0, 0, 0),
+        title="Camera Rotation",
+        description="Rotation of the camera",
+    )
+
+    camera_focal_length: float = Field(
+        default=15,
+        title="Camera Focal Length",
+        description="Focal length of the camera",
+    )
+
+    camera_horizontal_aperture: float = Field(
+        default=20,
+        title="Camera Focal Length",
+        description="Focal length of the camera",
+    )
+
+    image_resolution: Tuple[float, float] = Field(
+        default=(1024, 1024),
+        title="Output image resolution",
+        description="Output image resolution",
+    )
+
+
+@router.post(
+    "/render",
+    summary="Render from a camera position",
+    description="An endpoint render from a camera position",
+)
+async def render(render_data: RenderModel):
+    print(f"[miris_render_server_ext] /render was called with args: {render_data}")
+
+    # Create the hydra render product
+    camera = rep.create.camera(
+        position=render_data.camera_position,
+        rotation=render_data.camera_rotation,
+        focal_length=render_data.camera_focal_length,
+        horizontal_aperture=render_data.camera_horizontal_aperture,
+        name=render_data.camera_name,
+    )
+
+    render_product = rep.create.render_product(
+        camera,
+        resolution=render_data.image_resolution,
+        name=render_data.camera_name,
+    )
+
+    with rep.trigger.on_frame(max_execs=1):
+        pass
+
+    # Initialize and attach writer
+    writer = rep.WriterRegistry.get("BasicWriter")
+    writer.initialize(
+        output_dir=f"_output_{render_data.camera_name}",
+        rgb=True,
+        distance_to_image_plane=True,
+        colorize_depth=True,
+    )
+    writer.attach([render_product])
+
+    # Execute the tasks asynchronously
+    rep.orchestrator.run()
+
+    msg = f"[miris_render_server_ext] Rendered camera {render_data.camera_name}"
     print(msg)
     return msg
