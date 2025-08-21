@@ -28,13 +28,6 @@ cd kit_render_service
 ./repo.sh launch -- --no-window
 ```
 
-## Launch the service
-
-**Linux:**
-```bash
-./repo.sh launch -- --no-window
-```
-
 ## Try sending requests to the service
 
 Open your webbrowser to http://localhost:8011/docs
