@@ -5,6 +5,10 @@ from input camera locations.
 
 Only tested on Linux (Ubuntu-24.04)
 
+## Install pre-requisites
+
+See https://github.com/NVIDIA-Omniverse/kit-app-template to install any system pre-requisites for building or packaging
+
 ## Clone the repo
 
 Begin by cloning the `kit_render_service` to your local workspace:
