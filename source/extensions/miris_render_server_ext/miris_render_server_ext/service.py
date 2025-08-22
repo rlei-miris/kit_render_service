@@ -13,6 +13,8 @@ import tempfile
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import Tuple
+from dataclasses import asdict
+from enum import Enum
 
 import omni.kit.commands
 import omni.usd
@@ -20,6 +22,8 @@ from omni.services.core.routers import ServiceAPIRouter
 import omni.replicator.core as rep
 
 from pxr import UsdGeom
+
+from .camera_utils import CameraInfo, conform_camera_vertical_aperture
 
 router = ServiceAPIRouter(tags=["Miris Render Server Extension"])
 
@@ -44,12 +48,36 @@ async def open_stage(request_data: OpenStageRequestData):
     usd_context = omni.usd.get_context()
     usd_context.open_stage(request_data.usd_file_location)
 
-    # Set to path traced
-    rep.settings.set_render_pathtraced()
-
     msg = f"[miris_render_server_ext] Opened stage: {request_data.usd_file_location}"
     print(msg)
     return msg
+
+
+class OmniverseRtxRenderer(Enum):
+    Interactive = "omniverse_rtx_interactive"
+    RealTime = "omniverse_rtx_realtime"
+
+
+class SetRendererRequestData(BaseModel):
+    renderer: OmniverseRtxRenderer = Field(
+        default=OmniverseRtxRenderer.RealTime,
+        title="Renderer type",
+        description=f"Set the type of renderer to use.  Options are: {[v.value for v in OmniverseRtxRenderer]}",
+    )
+
+@router.post(
+    "/set_renderer",
+    summary="Set the renderer type",
+)
+async def set_renderer(request_data: SetRendererRequestData):
+    print("[miris_render_server_ext] /set_renderer was called")
+    # Set to path traced
+    if request_data.renderer == OmniverseRtxRenderer.Interactive:
+        rep.settings.set_render_pathtraced()
+    elif request_data.renderer == OmniverseRtxRenderer.RealTime:
+        rep.settings.set_render_rtx_realtime()
+    else:
+        raise RuntimeError(f"Unknown renderer: {request_data.renderer})")
 
 
 class RenderRequestData(BaseModel):
@@ -93,9 +121,13 @@ class RenderRequestData(BaseModel):
 
 class RenderResponseData(BaseModel):
 
+    # Output file paths
     color_image_path: str = Field(title="Output color image path")
     depth_image_path: str = Field(title="Output depth image path")
     depth_npy_path: str = Field(title="Output depth npy path")
+
+    # Camera information
+    camera : CameraInfo = Field(title="Camera information")
 
 
 @router.post(
@@ -106,6 +138,11 @@ class RenderResponseData(BaseModel):
 )
 async def render(request_data: RenderRequestData):
     print(f"[miris_render_server_ext] /render was called with args: {request_data}")
+
+    usd_context = omni.usd.get_context()
+    stage = usd_context.get_stage()
+    if stage is None:
+        raise RuntimeError("No active stage, please open a USD file via /open_stage")
 
     # Create the hydra render product
     camera = rep.create.camera(
@@ -149,8 +186,18 @@ async def render(request_data: RenderRequestData):
     for file_path in (color_image_path, depth_image_path, depth_npy_path):
         assert os.path.isfile(file_path), f"Expected {file_path} to exist"
 
+    # Conform & extract information from camera
+    camera_xform_prim = camera.get_output_prims()["prims"][0]
+    camera_prim_path = camera_xform_prim.GetPrimPath().AppendChild(request_data.camera_name)
+    camera_prim = stage.GetPrimAtPath(camera_prim_path)
+    camera = UsdGeom.Camera(camera_prim)
+    assert camera, f"Invalid camera prim: {camera_prim}"
+    conform_camera_vertical_aperture(camera, request_data.image_resolution)
+    camera_info = CameraInfo.from_usd_camera(camera)
+
     return RenderResponseData(
         color_image_path=color_image_path,
         depth_image_path=depth_image_path,
         depth_npy_path=depth_npy_path,
+        camera=camera_info,
     )
